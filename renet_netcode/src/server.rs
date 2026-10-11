@@ -83,9 +83,21 @@ impl NetcodeServerTransport {
 
     /// Advances the transport by the duration, and receive packets from the network.
     pub fn update(&mut self, duration: Duration, server: &mut RenetServer) -> Result<(), NetcodeTransportError> {
+        self.update_with_packet_limit(duration, server, usize::MAX)
+    }
+
+    /// Advances time and receives at most `max_packets` datagrams. Remaining
+    /// datagrams stay in the socket for the next update so a sustained flood
+    /// cannot prevent the caller from advancing its simulation.
+    pub fn update_with_packet_limit(
+        &mut self,
+        duration: Duration,
+        server: &mut RenetServer,
+        max_packets: usize,
+    ) -> Result<(), NetcodeTransportError> {
         self.netcode_server.update(duration);
 
-        loop {
+        for _ in 0..max_packets {
             match self.socket.recv_from(&mut self.buffer) {
                 Ok((len, addr)) => {
                     let server_result = self.netcode_server.process_packet(addr, &mut self.buffer[..len]);
@@ -165,5 +177,33 @@ fn handle_server_result(server_result: ServerResult, socket: &UdpSocket, reliabl
                 send_packet(payload, addr);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn packet_budget_leaves_excess_datagrams_for_later_updates() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let address = socket.local_addr().unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut transport = NetcodeServerTransport::new(
+            ServerConfig {
+                current_time: Duration::ZERO,
+                max_clients: 4,
+                protocol_id: 1,
+                public_addresses: vec![address],
+                authentication: crate::ServerAuthentication::Unsecure,
+            },
+            socket,
+        )
+        .unwrap();
+        let mut server = RenetServer::new(Default::default());
+        for _ in 0..6 {
+            sender.send_to(&[0], address).unwrap();
+        }
+        transport.update_with_packet_limit(Duration::ZERO, &mut server, 2).unwrap();
+        assert_eq!(transport.socket.recv_from(&mut [0; 4]).unwrap().0, 1);
     }
 }

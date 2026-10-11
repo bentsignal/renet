@@ -84,6 +84,17 @@ impl NetcodeClientTransport {
 
     /// Advances the transport by the duration, and receive packets from the network.
     pub fn update(&mut self, duration: Duration, client: &mut RenetClient) -> Result<(), NetcodeTransportError> {
+        self.update_with_packet_limit(duration, client, usize::MAX)
+    }
+
+    /// Advances time and receives at most `max_packets` datagrams, retaining
+    /// the remainder in the socket for later updates.
+    pub fn update_with_packet_limit(
+        &mut self,
+        duration: Duration,
+        client: &mut RenetClient,
+        max_packets: usize,
+    ) -> Result<(), NetcodeTransportError> {
         if let Some(reason) = self.netcode_client.disconnect_reason() {
             // Mark the client as disconnected if an error occurred in the transport layer
             client.disconnect_due_to_transport();
@@ -103,7 +114,7 @@ impl NetcodeClientTransport {
             client.set_connecting();
         }
 
-        loop {
+        for _ in 0..max_packets {
             let packet = match self.socket.recv_from(&mut self.buffer) {
                 Ok((len, addr)) => {
                     if addr != self.netcode_client.server_addr() {
@@ -128,5 +139,34 @@ impl NetcodeClientTransport {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn packet_budget_leaves_excess_datagrams_for_later_updates() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let address = socket.local_addr().unwrap();
+        let mut transport = NetcodeClientTransport::new(
+            Duration::ZERO,
+            ClientAuthentication::Unsecure {
+                protocol_id: 1,
+                client_id: 1,
+                server_addr,
+                user_data: None,
+            },
+            socket,
+        )
+        .unwrap();
+        let mut client = RenetClient::new(Default::default());
+        for _ in 0..6 {
+            server.send_to(&[0], address).unwrap();
+        }
+        transport.update_with_packet_limit(Duration::ZERO, &mut client, 2).unwrap();
+        assert_eq!(transport.socket.recv_from(&mut [0; 4]).unwrap().0, 1);
     }
 }

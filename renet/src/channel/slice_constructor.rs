@@ -23,6 +23,9 @@ impl SliceConstructor {
     }
 
     pub fn process_slice(&mut self, slice_index: usize, bytes: &[u8]) -> Result<Option<Bytes>, ChannelError> {
+        if slice_index >= self.num_slices {
+            return Err(ChannelError::InvalidSliceMessage);
+        }
         let is_last_slice = slice_index == self.num_slices - 1;
         if is_last_slice {
             if bytes.len() > SLICE_SIZE {
@@ -71,5 +74,20 @@ impl SliceConstructor {
         }
 
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn out_of_bounds_indices_return_errors_without_panicking() {
+        let mut constructor = SliceConstructor::new(0, 2);
+        for index in [2, 999_999, usize::MAX] {
+            assert_eq!(
+                constructor.process_slice(index, &vec![0; SLICE_SIZE]),
+                Err(ChannelError::InvalidSliceMessage)
+            );
+        }
     }
 }
