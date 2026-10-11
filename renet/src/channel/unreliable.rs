@@ -163,9 +163,19 @@ impl ReceiveChannelUnreliable {
     }
 
     pub fn process_slice(&mut self, slice: Slice, current_time: Duration) -> Result<(), ChannelError> {
+        if slice.num_slices == 0 || slice.slice_index >= slice.num_slices {
+            return Err(ChannelError::InvalidSliceMessage);
+        }
+        if self
+            .slices
+            .get(&slice.message_id)
+            .is_some_and(|message| message.num_slices != slice.num_slices)
+        {
+            return Err(ChannelError::InvalidSliceMessage);
+        }
         if !self.slices.contains_key(&slice.message_id) {
-            let message_len = slice.num_slices * SLICE_SIZE;
-            if self.memory_usage_bytes + message_len > self.max_memory_usage_bytes {
+            let message_len = slice.num_slices.checked_mul(SLICE_SIZE).ok_or(ChannelError::InvalidSliceMessage)?;
+            if message_len > self.max_memory_usage_bytes.saturating_sub(self.memory_usage_bytes) {
                 log::warn!(
                     "dropped unreliable slice message received because channel {} is memory limited",
                     self.channel_id
@@ -221,6 +231,57 @@ impl ReceiveChannelUnreliable {
         };
 
         None
+    }
+}
+
+#[cfg(test)]
+mod fragment_bounds_tests {
+    use super::*;
+    #[test]
+    fn changing_fragment_count_cannot_corrupt_memory_accounting() {
+        let mut channel = ReceiveChannelUnreliable::new(0, 10 * SLICE_SIZE);
+        channel
+            .process_slice(
+                Slice {
+                    message_id: 0,
+                    slice_index: 0,
+                    num_slices: 2,
+                    payload: vec![0; SLICE_SIZE].into(),
+                },
+                Duration::ZERO,
+            )
+            .unwrap();
+        let reserved = channel.memory_usage_bytes;
+        assert_eq!(
+            channel.process_slice(
+                Slice {
+                    message_id: 0,
+                    slice_index: 1,
+                    num_slices: 3,
+                    payload: vec![0; SLICE_SIZE].into()
+                },
+                Duration::ZERO
+            ),
+            Err(ChannelError::InvalidSliceMessage)
+        );
+        assert_eq!(channel.memory_usage_bytes, reserved);
+    }
+    #[test]
+    fn fragment_allocation_overflow_returns_error() {
+        let mut channel = ReceiveChannelUnreliable::new(0, 10 * SLICE_SIZE);
+        assert_eq!(
+            channel.process_slice(
+                Slice {
+                    message_id: 0,
+                    slice_index: 0,
+                    num_slices: usize::MAX,
+                    payload: vec![0; SLICE_SIZE].into()
+                },
+                Duration::ZERO
+            ),
+            Err(ChannelError::InvalidSliceMessage)
+        );
+        assert_eq!(channel.memory_usage_bytes, 0);
     }
 }
 

@@ -52,6 +52,7 @@ pub enum Packet {
 pub enum SerializationError {
     BufferTooShort,
     InvalidNumSlices,
+    InvalidSliceIndex,
     SliceSizeAboveLimit,
     EmptySlice,
     InvalidAckRange,
@@ -67,6 +68,7 @@ impl fmt::Display for SerializationError {
         match *self {
             BufferTooShort => write!(fmt, "buffer too short"),
             InvalidNumSlices => write!(fmt, "invalid number of slices"),
+            InvalidSliceIndex => write!(fmt, "slice index is outside the message"),
             InvalidAckRange => write!(fmt, "invalid ack range"),
             InvalidPacketType => write!(fmt, "invalid packet type"),
             SliceSizeAboveLimit => write!(fmt, "invalid slice size, it's above the limit of {} bytes", SLICE_SIZE),
@@ -254,6 +256,9 @@ impl Packet {
                 if num_slices == 0 || num_slices > 1_000_000 {
                     return Err(SerializationError::InvalidNumSlices);
                 }
+                if slice_index >= num_slices {
+                    return Err(SerializationError::InvalidSliceIndex);
+                }
 
                 let payload = b.get_bytes_with_varint_length()?;
 
@@ -287,8 +292,17 @@ impl Packet {
                 if num_slices == 0 || num_slices > 1_000_000 {
                     return Err(SerializationError::InvalidNumSlices);
                 }
+                if slice_index >= num_slices {
+                    return Err(SerializationError::InvalidSliceIndex);
+                }
 
                 let payload = b.get_bytes_with_varint_length()?;
+                if payload.is_empty() {
+                    return Err(SerializationError::EmptySlice);
+                }
+                if payload.len() > SLICE_SIZE {
+                    return Err(SerializationError::SliceSizeAboveLimit);
+                }
 
                 let slice = Slice {
                     message_id,
@@ -353,6 +367,57 @@ impl Packet {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rejects_out_of_bounds_fragment_indices_in_both_channels() {
+        for reliable in [false, true] {
+            for slice_index in [2, 999_999, usize::MAX >> 2] {
+                let slice = super::Slice {
+                    message_id: 0,
+                    slice_index,
+                    num_slices: 2,
+                    payload: vec![0; super::SLICE_SIZE].into(),
+                };
+                let packet = if reliable {
+                    super::Packet::ReliableSlice {
+                        sequence: 0,
+                        channel_id: 0,
+                        slice,
+                    }
+                } else {
+                    super::Packet::UnreliableSlice {
+                        sequence: 0,
+                        channel_id: 0,
+                        slice,
+                    }
+                };
+                let mut buffer = vec![0; 1400];
+                let len = packet.to_bytes(&mut octets::OctetsMut::with_slice(&mut buffer)).unwrap();
+                assert_eq!(
+                    super::Packet::from_bytes(&mut octets::Octets::with_slice(&buffer[..len])),
+                    Err(super::SerializationError::InvalidSliceIndex)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_empty_and_oversized_unreliable_fragments() {
+        for payload in [vec![], vec![0; super::SLICE_SIZE + 1]] {
+            let packet = super::Packet::UnreliableSlice {
+                sequence: 0,
+                channel_id: 0,
+                slice: super::Slice {
+                    message_id: 0,
+                    slice_index: 0,
+                    num_slices: 1,
+                    payload: payload.clone().into(),
+                },
+            };
+            let mut buffer = vec![0; 1400];
+            let len = packet.to_bytes(&mut octets::OctetsMut::with_slice(&mut buffer)).unwrap();
+            assert!(super::Packet::from_bytes(&mut octets::Octets::with_slice(&buffer[..len])).is_err());
+        }
+    }
     use super::*;
 
     #[test]
